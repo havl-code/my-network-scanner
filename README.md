@@ -1,5 +1,8 @@
 # my-network-scanner
 
+[![Python](https://img.shields.io/badge/python-3.7%2B-blue)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 A lightweight Python ARP + SYN scanner that finds live hosts on a local network, checks a list of common TCP ports, grabs service banners where it can, and takes a rough guess at each host's OS from its TTL. Built for learning how basic network reconnaissance tools work under the hood.
 
 ```
@@ -101,4 +104,8 @@ If a host has no reachable banner on any open port, its `banners` object is simp
 
 ## Disclaimer
 
-For **educational** and **authorized** use only. Do not scan networks or devices you don't own or don't have explicit permission to test. Unauthorized scanning is illegal and unethical.
+For **educational** and **authorized** use only. Do not scan networks or devices you don't own or don't have explicit permission to test — unauthorized scanning is illegal and unethical.
+
+## Licence
+
+Released under the MIT Licence, see [LICENSE](LICENSE).
