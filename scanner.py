@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Suppress scapy's own noisy runtime warnings BEFORE importing it
 logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 
-from scapy.all import ARP, Ether, srp, IP, TCP, sr1, conf, get_if_list
+from scapy.all import ARP, Ether, srp, IP, TCP, sr, sr1, conf, get_if_list
 
 conf.verb = 0  # silence scapy's internal per-packet logging
 
@@ -85,8 +85,15 @@ def arp_scan(network, iface=None):
     return devices
 
 
-# function to perform SYN scan on specific ports of a host, with retries on no-response ports
+# function to perform a batched TCP SYN scan on a list of ports
 def syn_scan(ip, ports, timeout=1, retries=1):
+    """
+    Sends all SYN probes for a host in one batch (scapy's sr, not a per-port sr1 loop),
+    which is much faster than probing ports one at a time since scapy fires them off
+    together and collects replies as they come in, rather than waiting on a full
+    round trip before sending the next probe. Ports that get no reply are retried
+    up to `retries` times before being called closed.
+    """
     log(f"[+] SYN scanning {ip}...")
     open_ports = []
     remaining = list(ports)
@@ -95,18 +102,21 @@ def syn_scan(ip, ports, timeout=1, retries=1):
         for attempt in range(retries + 1):
             if not remaining:
                 break
-            still_no_response = []
-            for port in remaining:
-                pkt = IP(dst=ip) / TCP(dport=port, flags="S")
-                resp = sr1(pkt, timeout=timeout, verbose=False)
-                if resp and resp.haslayer(TCP) and resp[TCP].flags == 0x12:
+
+            pkts = [IP(dst=ip) / TCP(dport=p, flags="S") for p in remaining]
+            answered, _unanswered = sr(pkts, timeout=timeout, verbose=False)
+
+            for sent, resp in answered:
+                port = sent[TCP].dport
+                if resp.haslayer(TCP) and resp[TCP].flags == 0x12:  # SYN-ACK -> open
                     open_ports.append(port)
                     rst = IP(dst=ip) / TCP(dport=port, flags="R", seq=resp[TCP].ack)
                     sr1(rst, timeout=timeout, verbose=False)
-                elif resp is None:
-                    still_no_response.append(port)  # give it another attempt
-                # a real reply that isn't SYN-ACK (e.g. RST) means closed - don't retry
-            remaining = still_no_response
+                # any other real reply (e.g. RST-ACK) means closed - don't retry
+
+            # only ports that got literally no reply are worth retrying
+            answered_ports = {sent[TCP].dport for sent, _ in answered}
+            remaining = [p for p in remaining if p not in answered_ports]
     except KeyboardInterrupt:
         print(f"\n[!] Interrupted SYN scan on {ip}.")
 
