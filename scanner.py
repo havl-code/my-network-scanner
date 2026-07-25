@@ -177,6 +177,17 @@ def grab_banner(ip, port, timeout=1):
         return None
 
 
+def ttl_to_os(ttl):
+    """Map a TCP reply TTL to a rough OS guess. Coarse heuristic, not real fingerprinting."""
+    if ttl <= 64:
+        return "Linux/Unix"
+    elif ttl <= 128:
+        return "Windows"
+    elif ttl <= 255:
+        return "Cisco/Networking Device"
+    return "Unknown"
+
+
 # function to estimate OS based on TTL value from TCP response
 def detect_os(ip, fallback_ports=None, timeout=1):
     ports_to_try = fallback_ports or [80, 443, 22]
@@ -185,15 +196,7 @@ def detect_os(ip, fallback_ports=None, timeout=1):
             pkt = IP(dst=ip) / TCP(dport=port, flags="S")
             resp = sr1(pkt, timeout=timeout, verbose=False)
             if resp:
-                ttl = resp.ttl
-                if ttl <= 64:
-                    return "Linux/Unix"
-                elif ttl <= 128:
-                    return "Windows"
-                elif ttl <= 255:
-                    return "Cisco/Networking Device"
-                else:
-                    return "Unknown"
+                return ttl_to_os(resp.ttl)
         except (socket.timeout, OSError):
             continue
     return "Unknown"
