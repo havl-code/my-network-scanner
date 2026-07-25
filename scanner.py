@@ -12,11 +12,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Suppress scapy's own noisy runtime warnings BEFORE importing it
 logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 
-from scapy.all import ARP, Ether, srp, IP, TCP, sr, sr1, conf, get_if_list
+from scapy.all import ARP, Ether, srp, IP, TCP, UDP, ICMP, sr, sr1, conf, get_if_list
 
 conf.verb = 0  # silence scapy's internal per-packet logging
 
 COMMON_PORTS = [21, 22, 23, 25, 53, 80, 110, 139, 143, 443, 445, 3306, 3389]
+DEFAULT_UDP_PORTS = [53, 67, 68, 69, 123, 161, 162, 500, 514, 1900]
 
 results = {}    # global dictionary to hold scan results
 QUIET = False   # set from CLI args in main()
@@ -46,6 +47,21 @@ def require_root():
     if hasattr(os, "geteuid") and os.geteuid() != 0:
         print("[!] This script needs root privileges (raw packet access). Try: sudo python3 scanner.py")
         sys.exit(1)
+
+
+def parse_ports(spec):
+    """Parse a ports spec like '22,80,100-110' into a sorted list of ints."""
+    ports = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, end = part.split("-", 1)
+            ports.update(range(int(start), int(end) + 1))
+        else:
+            ports.add(int(part))
+    return sorted(ports)
 
 
 # function to perform ARP scan on local network
@@ -123,6 +139,32 @@ def syn_scan(ip, ports, timeout=1, retries=1):
     return sorted(open_ports)
 
 
+# function to perform a basic UDP scan
+def udp_scan(ip, ports, timeout=1):
+    """
+    UDP has no handshake, so results here are inherently fuzzier than the TCP scan:
+    a real UDP reply means the port is open, an ICMP port-unreachable means it's
+    closed, and silence is reported as open|filtered since that's genuinely
+    ambiguous over UDP (could be an open port that just didn't answer, or a
+    firewall silently dropping the probe).
+    """
+    log(f"[+] UDP scanning {ip}...")
+    open_or_filtered = []
+    try:
+        for port in ports:
+            pkt = IP(dst=ip) / UDP(dport=port)
+            resp = sr1(pkt, timeout=timeout, verbose=False)
+            if resp is None:
+                open_or_filtered.append(port)  # ambiguous, no reply at all
+            elif resp.haslayer(ICMP) and resp[ICMP].type == 3 and resp[ICMP].code == 3:
+                continue  # ICMP port-unreachable -> closed, drop it
+            else:
+                open_or_filtered.append(port)  # got a real UDP reply -> open
+    except KeyboardInterrupt:
+        print(f"\n[!] Interrupted UDP scan on {ip}.")
+    return sorted(open_or_filtered)
+
+
 # function to grab banner from a given port
 def grab_banner(ip, port, timeout=1):
     try:
@@ -158,7 +200,7 @@ def detect_os(ip, fallback_ports=None, timeout=1):
 
 
 # function to scan a single host end-to-end (ports, banners, OS) - used for threaded scanning
-def scan_host(device, common_ports, timeout, retries):
+def scan_host(device, common_ports, timeout, retries, udp_ports=None):
     ip = device["ip"]
     mac = device["mac"]
     log(f"\n[+] Host found: {ip} | {mac}")
@@ -173,13 +215,18 @@ def scan_host(device, common_ports, timeout, retries):
 
     os_type = detect_os(ip, ports)
 
-    return {
+    result = {
         "ip": ip,
         "mac": mac,
         "os": os_type,
         "open_ports": ports,
         "banners": banners,
     }
+
+    if udp_ports:
+        result["open_udp_ports"] = udp_scan(ip, udp_ports, timeout=timeout)
+
+    return result
 
 
 # function to save scan results to a JSON file
@@ -192,6 +239,9 @@ def save_results(data, filename="results.json"):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Simple ARP + SYN network scanner.")
     parser.add_argument("network", nargs="?", help="CIDR network or single IP (prompted if omitted)")
+    parser.add_argument("--ports", default=None, help="TCP ports, e.g. '22,80,1000-1010' (default: common ports list)")
+    parser.add_argument("--udp", action="store_true", help="also run a UDP scan")
+    parser.add_argument("--udp-ports", default=None, help="UDP ports to probe if --udp is set (default: common UDP ports)")
     parser.add_argument("--timeout", type=float, default=1.0, help="per-probe timeout in seconds")
     parser.add_argument("--retries", type=int, default=1, help="retries for TCP ports with no response")
     parser.add_argument("--iface", default=None, help="network interface to send/receive on")
@@ -215,6 +265,8 @@ def main():
     require_root()
 
     network = args.network or input("Enter network (e.g. 192.168.1.0/24 or single IP): ").strip()
+    tcp_ports = parse_ports(args.ports) if args.ports else COMMON_PORTS
+    udp_ports = (parse_ports(args.udp_ports) if args.udp_ports else DEFAULT_UDP_PORTS) if args.udp else None
 
     results = {
         "network": network,
@@ -231,7 +283,7 @@ def main():
     max_workers = min(10, len(devices))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
-            executor.submit(scan_host, device, COMMON_PORTS, args.timeout, args.retries)
+            executor.submit(scan_host, device, tcp_ports, args.timeout, args.retries, udp_ports)
             for device in devices
         ]
         for future in as_completed(futures):
